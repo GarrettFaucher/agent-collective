@@ -225,16 +225,7 @@ interface CollectivePi {
 /** One collective node per process, even when several sessions load the extension. */
 let node: CollectiveNode | undefined;
 
-/**
- * Get the live node, starting one if this process has none.
- *
- * Creating the node only inside `session_start` was a latent failure: any path where that
- * handler does not run for the session actually in front of the user — the module loaded
- * after the session began (an install plus `/reload-plugins`), or a session replaced within
- * the process — left the commands registered with nothing behind them, reporting
- * "collective: not started" until the process restarted. Every entry point re-arms instead,
- * so the node exists as soon as anything asks for it.
- */
+/** Start membership only from an explicit /collective command. */
 function ensureNode(pi: CollectivePi, ctx: CollectiveContext): CollectiveNode | undefined {
 	if (node && !node.stopped) return node;
 	try {
@@ -260,6 +251,8 @@ class CollectiveNode {
 	readonly #peers = new Map<string, PeerRecord>();
 	/** Bodies accumulating inside the current burst window, keyed by sender. */
 	readonly #pending = new Map<string, { bodies: string[]; hop: number }>();
+	readonly #sockets = new Set<net.Socket>();
+	readonly #cancelBatches = new Set<() => void>();
 	/** Hop count of the inbound message whose turn is currently running, if any. */
 	#inboundHop: number | undefined;
 	#override: string | undefined;
@@ -324,11 +317,17 @@ class CollectiveNode {
 		if (this.#stopped) return;
 		this.#stopped = true;
 		this.#stopTimer?.();
+		for (const cancel of this.#cancelBatches) cancel();
+		this.#cancelBatches.clear();
+		this.#pending.clear();
+		for (const socket of this.#sockets) socket.destroy();
+		this.#sockets.clear();
 		this.#server?.close();
 		fs.rmSync(this.#socketPath, { force: true });
 		fs.rmSync(this.#recordPath, { force: true });
 		for (const callsign of this.#peers.keys()) this.#releasePeer(callsign);
 		this.#peers.clear();
+		this.#ctx.ui.setStatus("collective", undefined);
 	}
 
 	setOverride(name: string): string {
@@ -524,6 +523,7 @@ class CollectiveNode {
 					replyTo: msg.replyTo,
 					hop: this.#outboundHop(),
 				});
+				if (!reply?.ok) throw new Error(reply?.error ?? "Collective connection closed");
 				return reply?.outcome === "woken" ? "woken" : "injected";
 			},
 		};
@@ -582,9 +582,12 @@ class CollectiveNode {
 
 	/** One request/response round trip over a peer's socket. */
 	#request(record: PeerRecord, frame: PeerFrame): Promise<PeerReply | undefined> {
+		if (this.#stopped) return Promise.resolve({ ok: false, error: "Collective disconnected" });
 		const { promise, resolve } = Promise.withResolvers<PeerReply | undefined>();
 		let settled = false;
 		const socket = net.createConnection({ path: record.socket });
+		this.#sockets.add(socket);
+		socket.on("close", () => this.#sockets.delete(socket));
 		const finish = (value: PeerReply | undefined): void => {
 			if (settled) return;
 			settled = true;
@@ -610,6 +613,12 @@ class CollectiveNode {
 	}
 
 	#accept(socket: net.Socket): void {
+		if (this.#stopped) {
+			socket.destroy();
+			return;
+		}
+		this.#sockets.add(socket);
+		socket.on("close", () => this.#sockets.delete(socket));
 		let buffer = "";
 		socket.on("error", () => socket.destroy());
 		socket.on("data", chunk => {
@@ -625,6 +634,7 @@ class CollectiveNode {
 	}
 
 	async #handle(line: string, socket: net.Socket): Promise<void> {
+		if (this.#stopped) return;
 		let frame: PeerFrame;
 		try {
 			frame = JSON.parse(line) as PeerFrame;
@@ -671,9 +681,16 @@ class CollectiveNode {
 		this.#pending.set(frame.from, { bodies: [frame.body], hop });
 		try {
 			const { promise, resolve } = Promise.withResolvers<void>();
+			const cancel = (): void => {
+				clearTimeout(timer);
+				resolve();
+			};
 			const timer = setTimeout(resolve, COALESCE_MS);
+			this.#cancelBatches.add(cancel);
 			timer.unref?.();
 			await promise;
+			this.#cancelBatches.delete(cancel);
+			if (this.#stopped) return;
 			const batch = this.#pending.get(frame.from) ?? { bodies: [frame.body], hop };
 			this.#pending.delete(frame.from);
 			const body =
@@ -728,6 +745,7 @@ class CollectiveNode {
 			if (receipt?.outcome === "failed") throw new Error(receipt.error ?? "delivery failed");
 			return receipt?.outcome === "woken" ? "woken" : "injected";
 		} catch (error) {
+			if (this.#stopped) throw error;
 			this.#pi.logger?.warn(`collective: bus delivery failed (${String(error)}); falling back to a prompt`);
 			this.#pi.sendUserMessage(text, { deliverAs: "aside" });
 			return "injected";
@@ -736,20 +754,11 @@ class CollectiveNode {
 }
 
 export default function collective(pi: CollectivePi): void {
-	pi.on("session_start", async (_event, ctx) => {
-		ensureNode(pi, ctx);
-	});
-
-	// A session replaced inside this process (`/new`, `/resume`, `/fork`, `/switch`) tears the
-	// node down with its session; the next handler or command re-arms it against the new one.
-	pi.on("session_shutdown", async () => {
-		node?.stop();
-		node = undefined;
-	});
-
-	for (const event of ["session_switch", "session_branch", "session_tree"]) {
-		pi.on(event, async (_payload, ctx) => {
-			ensureNode(pi, ctx);
+	// Membership belongs to the current session and never survives a lifecycle change.
+	for (const event of ["session_start", "session_shutdown", "session_switch", "session_branch", "session_tree"]) {
+		pi.on(event, async () => {
+			node?.stop();
+			node = undefined;
 		});
 	}
 
@@ -771,9 +780,8 @@ export default function collective(pi: CollectivePi): void {
 	 * that never reaches the transcript, and appending to the last user message keeps
 	 * provider role alternation and the cached prompt prefix intact.
 	 */
-	pi.on("context", async (event, ctx) => {
-		// Runs before every model call, so it doubles as the reliable re-arm point.
-		const live = ensureNode(pi, ctx);
+	pi.on("context", async event => {
+		const live = node;
 		const peers = live?.peers ?? [];
 		if (!live || peers.length === 0) return;
 		const roster = peers
@@ -793,7 +801,7 @@ export default function collective(pi: CollectivePi): void {
 				];
 		const note = [
 			"<collective-peers>",
-			`You are the agent instance with collective callsign \`${node.callsign}\`.`,
+			`You are the agent instance with collective callsign \`${live.callsign}\`.`,
 			...how,
 			"",
 			roster,
@@ -814,8 +822,11 @@ export default function collective(pi: CollectivePi): void {
 	pi.registerCommand("callsign", {
 		description: "Show or set this instance's collective callsign",
 		handler: async (args, ctx) => {
-			const live = ensureNode(pi, ctx);
-			if (!live) return;
+			const live = node;
+			if (!live || live.stopped) {
+				ctx.ui.notify("collective: disconnected — run /collective to join first", "info");
+				return;
+			}
 			const name = args.trim();
 			if (name.length === 0) {
 				ctx.ui.notify(`collective callsign: ${live.callsign}`, "info");
@@ -826,9 +837,24 @@ export default function collective(pi: CollectivePi): void {
 	});
 
 	pi.registerCommand("collective", {
-		description: "List live agent instances on this machine",
-		handler: async (_args, ctx) => {
-			const live = ensureNode(pi, ctx);
+		description: "Join and list peers, inspect status, or leave: /collective [status|leave]",
+		handler: async (args, ctx) => {
+			const action = args.trim();
+			if (action === "leave") {
+				node?.stop();
+				node = undefined;
+				ctx.ui.notify("collective: disconnected", "info");
+				return;
+			}
+			if (action !== "" && action !== "status") {
+				ctx.ui.notify("Usage: /collective [status|leave]", "warning");
+				return;
+			}
+			const live = action === "" ? ensureNode(pi, ctx) : node;
+			if (action === "status" && (!live || live.stopped)) {
+				ctx.ui.notify("collective: disconnected", "info");
+				return;
+			}
 			if (!live) return;
 			const peers = live.peers;
 			const mode = bridge ? "hub bridge" : "peer tools";
@@ -854,6 +880,9 @@ export default function collective(pi: CollectivePi): void {
 				"List the other live agent instances (omp or pi) on this machine, by callsign. Use peer_send to message one.",
 			parameters: { type: "object", properties: {}, additionalProperties: false },
 			execute: async () => {
+				if (!node || node.stopped) {
+					return { content: [{ type: "text", text: "Collective disconnected. Run /collective to join." }] };
+				}
 				const peers = node?.peers ?? [];
 				if (peers.length === 0) {
 					return { content: [{ type: "text", text: "No peers. You are the only live instance." }] };

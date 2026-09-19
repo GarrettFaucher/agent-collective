@@ -1,18 +1,18 @@
 {
   "name": "agent-collective",
   "owner": {
-    "name": "Andrei Verdes"
+    "name": "GarrettFaucher"
   },
   "metadata": {
-    "description": "Cross-instance peer awareness and steering for omp",
-    "version": "0.1.0"
+    "description": "Opt-in cross-instance peer awareness and steering for omp",
+    "version": "0.3.1"
   },
   "plugins": [
     {
       "name": "agent-collective",
       "source": "./",
-      "version": "0.1.0",
-      "description": "Every running omp instance sees the others by callsign and can prompt them through the built-in hub tool.",
+      "version": "0.3.1",
+      "description": "Join with /collective to discover and message peers through hub; sessions stay disconnected by default.",
       "category": "development",
       "license": "MIT",
       "keywords": ["multi-agent", "agent-coordination", "peer-discovery", "hub", "callsign"]

@@ -1,7 +1,7 @@
 {
   "name": "agent-collective",
   "version": "0.3.1",
-  "description": "Cross-instance peer awareness and steering for omp and pi: every running instance sees the others by callsign and can prompt them \u2014 natively through omp's hub tool, or via peers/peer_send tools on pi.",
+  "description": "Opt-in, session-scoped peer awareness and communication for omp and pi. Join with /collective; otherwise remain disconnected.",
   "type": "module",
   "main": "./index.ts",
   "exports": {
@@ -50,12 +50,12 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/andreiverdes/agent-collective.git"
+    "url": "git+https://github.com/GarrettFaucher/agent-collective.git"
   },
   "bugs": {
-    "url": "https://github.com/andreiverdes/agent-collective/issues"
+    "url": "https://github.com/GarrettFaucher/agent-collective/issues"
   },
-  "homepage": "https://github.com/andreiverdes/agent-collective#readme",
+  "homepage": "https://github.com/GarrettFaucher/agent-collective#readme",
   "author": "andreiverdes (https://github.com/andreiverdes)",
   "pi": {
     "extensions": [

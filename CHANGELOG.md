@@ -1,5 +1,16 @@
 # Changelog
 
+## Local opt-in fork
+
+- Sessions start disconnected. `/collective` joins and lists peers; `/collective status`
+  never joins; `/collective leave` disconnects. Callsign changes never enroll a session.
+- Membership resets on session lifecycle changes and is never persisted.
+- Leaving clears presence, imported peers and footer status, closes sockets, and cancels
+  queued message batches. Model context hooks no longer restart a disconnected node.
+- Failed socket deliveries now surface as errors through the omp bridge.
+- Added a real Unix-socket regression covering opt-in, session transitions, and queued
+  delivery cancellation across immediate rejoin (`bun test`).
+
 ## 0.3.1
 
 - Fixed `collective: not started`. The node was created only inside `session_start`, so any path

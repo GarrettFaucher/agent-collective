@@ -3,9 +3,10 @@
 Cross-instance peer awareness and steering for [omp](https://www.npmjs.com/package/@oh-my-pi/pi-coding-agent)
 **and [pi](https://www.npmjs.com/package/@earendil-works/pi-coding-agent)**.
 
-Every running instance announces itself, sees the others by **callsign**, and can prompt them. One
-machine-global registry is shared by both harnesses, so an omp terminal and a pi terminal peer with
-each other.
+This fork of [andreiverdes/agent-collective](https://github.com/andreiverdes/agent-collective)
+uses **explicit, session-scoped membership**. Run `/collective` in each terminal
+you want to connect. Joined instances announce themselves, see one another by **callsign**, and
+can exchange prompts through a shared registry under the same user's home directory.
 
 **On omp** it needs no new tool — peers are bridged into the same registry the built-in `hub` tool
 resolves names against:
@@ -28,25 +29,21 @@ The host is probed once at load, so one file serves both.
 
 ## Install
 
-omp:
+Clone this fork, then link it into omp:
 
 ```sh
-omp plugin install agent-collective
+git clone https://github.com/GarrettFaucher/agent-collective.git "$HOME/git/agent-collective"
+omp plugin link "$HOME/git/agent-collective"
 ```
 
-pi:
+Restart existing omp instances to load the extension. New sessions start disconnected.
+The installed link points at this checkout; keep it in place. Do not install the upstream npm
+or marketplace package alongside it: those versions automatically join.
+
+To remove the link:
 
 ```sh
-pi install npm:agent-collective
-```
-
-Restart each instance you want in the collective (extensions load at session start).
-
-This repo also ships `.omp-plugin/marketplace.json`, so it works as an omp marketplace source:
-
-```sh
-omp plugin marketplace add andreiverdes/agent-collective
-omp plugin install agent-collective@agent-collective
+omp plugin uninstall agent-collective
 ```
 
 Install it **one way only**. Two copies loaded in one process (for example an npm install plus a
@@ -58,16 +55,27 @@ two sockets, and peer refs claimed twice.
 | Input                          | Effect                                                                    |
 | ------------------------------ | ------------------------------------------------------------------------- |
 | `/rename 007`                  | Renames the session; the collective adopts `007` as the callsign          |
-| `/callsign 007`                | Sets the callsign only, leaving the session title alone                   |
-| `/collective`                  | Lists live instances (callsign, harness, pid, cwd, working state)         |
+| `/callsign 007`                | Sets the callsign after joining, leaving the session title alone          |
+| `/collective`                  | Joins if disconnected, then lists joined peers; repeat calls do not toggle |
+| `/collective status`           | Reports membership and, when joined, peers; never joins                  |
+| `/collective leave`            | Disconnects and removes local presence and imported peer references       |
 | `hub op=list` / `op=send`      | omp: peers as addressable agents; `await=true` waits for the reply        |
 | `peers` / `peer_send`          | pi: the same two operations as tools                                      |
+
+Startup, shutdown, and session changes (new/resumed/switched/branched/tree navigation) reset
+membership to disconnected. Membership is not persisted. While disconnected there is no
+listener, heartbeat, peer registration, roster injection, or collective footer chip.
+Neither `/callsign` nor model calls enroll a session. Unknown command arguments do not join.
+
+Leaving cancels queued incoming batches and closes existing sockets. Messages already delivered
+to the host cannot be retracted; leaving does not abort an agent turn already underway.
+Other terminals remove your stale roster entry on their next heartbeat (normally within 1.2 s).
 
 The footer carries a roster chip — `⇄ 007 goose-3182* +2` — where `*` marks a working peer,
 working peers and peers sharing your cwd sort first, and the rest collapse into `+N`.
 
-Every model call also carries a short roster block naming your own callsign, each peer's harness,
-and how to reach them, so an agent can address peers without being told they exist.
+While joined, each model call carries a short roster block naming your own callsign, each peer's
+harness, and how to reach them, provided another peer is present.
 
 ### Callsigns
 
@@ -85,9 +93,9 @@ Name collisions deconflict by start time: the older instance keeps the bare name
 
 ## How it works
 
-- Each process writes `~/.agent-collective/<pid>.json` (0600, 1.2 s heartbeat) and listens on
+- Each joined process writes `~/.agent-collective/<pid>.json` (0600, 1.2 s heartbeat) and listens on
   `<pid>.sock` beside it. Liveness is `process.kill(pid, 0)` plus a stale-beat reap, matching omp's
-  own presence conventions. Records and sockets are unlinked on session shutdown. The directory is
+  own presence conventions. Records and sockets are unlinked on leave or session change. The directory is
   deliberately not derived from any env var — two terminals with different environments must never
   end up in two separate collectives.
 - The host is probed once during module evaluation (top-level await), because tool registration is
@@ -106,6 +114,8 @@ Name collisions deconflict by start time: the older instance keeps the bare name
 ## Limits
 
 - **Same machine only.** Unix sockets, one shared directory. For remote pairing use omp's `/collab`.
+- **Opt-in is not a privacy boundary after joining.** Keep private/local-only sessions disconnected:
+  joining allows communication with cloud-backed peers. There are no project allowlists.
 - **Depends on omp internals for bridge mode.** It imports
   `@oh-my-pi/pi-coding-agent/registry/agent-registry` and `/tools/hub/messaging` — real host
   singletons, but not a stable extension API. If an omp upgrade removes them from the bundled export
